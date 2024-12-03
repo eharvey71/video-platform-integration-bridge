@@ -177,6 +177,7 @@ def get_instructor_recordings(instructor_id: str, course_id: str) -> Dict:
     try:
         verify_access_key()
         client = get_zoom_client()
+        logger.log(f"Starting recording search for instructor: {instructor_id}")
 
         start_date = datetime(2020, 1, 1)
         end_date = datetime.now()
@@ -195,13 +196,19 @@ def get_instructor_recordings(instructor_id: str, course_id: str) -> Dict:
                     params={"page_size": 300, "from": range_start, "to": range_end},
                 )
 
-                all_recordings.extend(recordings_response.get("meetings", []))
+                recordings = recordings_response.get("meetings", [])
+                # logger.log(
+                #    f"Found {len(recordings)} recordings for date range {range_start} to {range_end}"
+                # )
+                all_recordings.extend(recordings)
 
             except HTTPError as e:
                 if e.response.status_code == 404:
                     try:
                         user = client._make_request("GET", f"users/{instructor_id}")
                         user_id = user.get("id")
+                        logger.log(f"Retrying with resolved user ID: {user_id}")
+
                         recordings_response = client._make_request(
                             "GET",
                             f"users/{user_id}/recordings",
@@ -212,7 +219,11 @@ def get_instructor_recordings(instructor_id: str, course_id: str) -> Dict:
                             },
                         )
 
-                        all_recordings.extend(recordings_response.get("meetings", []))
+                        recordings = recordings_response.get("meetings", [])
+                        logger.log(
+                            f"Found {len(recordings)} recordings using resolved user ID"
+                        )
+                        all_recordings.extend(recordings)
 
                     except HTTPError:
                         logger.log(
@@ -224,15 +235,19 @@ def get_instructor_recordings(instructor_id: str, course_id: str) -> Dict:
 
             current_date = current_date - timedelta(days=30)
 
+        logger.log(f"Total recordings found before filtering: {len(all_recordings)}")
+
         filtered_recordings = []
         for recording in all_recordings:
             meeting_id = recording.get("id")
             uuid = recording.get("uuid", "")
+            topic = recording.get("topic", "No topic")
 
             try:
                 meeting_report = client._make_request(
                     "GET", f"report/meetings/{meeting_id}"
                 )
+                logger.log(f"Checking meeting ID: {meeting_id} - Topic: {topic}")
 
             except HTTPError as meeting_error:
                 error_response = json.loads(meeting_error.response.text)
@@ -241,12 +256,17 @@ def get_instructor_recordings(instructor_id: str, course_id: str) -> Dict:
                     and error_response.get("code") == 3001
                 ):
                     try:
+                        logger.log(f"Retrying meeting {meeting_id} with UUID: {uuid}")
                         meeting_report = client._make_request(
                             "GET", f"report/meetings/{uuid}"
                         )
                     except HTTPError:
+                        logger.log(
+                            f"Failed to get report for meeting {meeting_id} using both ID and UUID"
+                        )
                         continue
                 else:
+                    logger.log(f"Failed to get report for meeting {meeting_id}")
                     continue
 
             tracking_fields = meeting_report.get("tracking_fields", [])
@@ -262,6 +282,9 @@ def get_instructor_recordings(instructor_id: str, course_id: str) -> Dict:
             if canvas_course_field and str(canvas_course_field.get("value", "")) == str(
                 course_id
             ):
+                logger.log(
+                    f"Found matching course ID {course_id} for meeting {meeting_id}"
+                )
                 recording_info = {
                     "id": recording.get("id"),
                     "uuid": recording.get("uuid"),
@@ -280,7 +303,12 @@ def get_instructor_recordings(instructor_id: str, course_id: str) -> Dict:
                     ],
                 }
                 filtered_recordings.append(recording_info)
+            else:
+                logger.log(f"No matching course ID for meeting {meeting_id}")
 
+        logger.log(
+            f"Found {len(filtered_recordings)} recordings matching course ID {course_id}"
+        )
         return {"recordings": filtered_recordings}
 
     except Exception as e:
