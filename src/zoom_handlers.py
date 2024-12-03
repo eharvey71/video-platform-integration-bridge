@@ -1,11 +1,13 @@
 from config import app
-from flask import json, request, abort, current_app, jsonify
+from flask import json, request, abort, jsonify
 from src.models import ZoomClientConfig
 import src.logger as logger
-import re, requests
+import requests
 from requests.exceptions import HTTPError
 from typing import Dict, List, Optional
-from datetime import datetime, timedelta
+from datetime import datetime, timezone, timedelta
+import re
+
 
 class ZoomOAuth:
     TOKEN_URL = "https://zoom.us/oauth/token"
@@ -20,7 +22,11 @@ class ZoomOAuth:
         return ZoomClientConfig.query.first()
 
     def get_access_token(self):
-        if self.access_token and self.token_expiry and datetime.now() < self.token_expiry:
+        if (
+            self.access_token
+            and self.token_expiry
+            and datetime.now() < self.token_expiry
+        ):
             return self.access_token
 
         config = self.get_config()
@@ -31,7 +37,7 @@ class ZoomOAuth:
             "grant_type": "account_credentials",
             "account_id": config.zoom_account_id,
             "client_id": config.zoom_client_id,
-            "client_secret": config.zoom_client_secret
+            "client_secret": config.zoom_client_secret,
         }
 
         try:
@@ -40,24 +46,18 @@ class ZoomOAuth:
             token_data = response.json()
 
             self.access_token = token_data["access_token"]
-            self.token_expiry = datetime.now() + timedelta(seconds=token_data["expires_in"])
+            self.token_expiry = datetime.now() + timedelta(
+                seconds=token_data["expires_in"]
+            )
 
             return self.access_token
         except HTTPError as http_err:
             if response.status_code == 400:
-                error_message = "Failed to obtain Zoom access token. Please check your Zoom credentials and ensure your Marketplace App is activated."
+                error_message = "Failed to obtain Zoom access token. Please check your Zoom credentials."
                 logger.log(f"{error_message} Details: {response.text}")
-                raise ZoomAuthenticationError(error_message) from http_err
-            else:
-                logger.log(f"HTTP error occurred: {http_err}")
-                raise
-        except Exception as err:
-            logger.log(f"An error occurred while obtaining Zoom access token: {err}")
+                raise ValueError(error_message) from http_err
             raise
-            
-class ZoomAuthenticationError(Exception):
-    """Custom exception for Zoom authentication errors."""
-    pass
+
 
 class ZoomClient:
     BASE_URL = "https://api.zoom.us/v2"
@@ -68,134 +68,44 @@ class ZoomClient:
     def _get_headers(self):
         return {
             "Authorization": f"Bearer {self.oauth.get_access_token()}",
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
         }
 
-    def _make_request(self, method: str, endpoint: str, params: Optional[Dict] = None, data: Optional[Dict] = None) -> Dict:
+    def _make_request(
+        self,
+        method: str,
+        endpoint: str,
+        params: Optional[Dict] = None,
+        data: Optional[Dict] = None,
+    ) -> Dict:
         url = f"{self.BASE_URL}/{endpoint}"
-        response = requests.request(method, url, headers=self._get_headers(), params=params, json=data)
+        response = requests.request(
+            method, url, headers=self._get_headers(), params=params, json=data
+        )
         response.raise_for_status()
         return response.json()
+
 
 def get_zoom_client():
     try:
         with app.app_context():
             zoom_config = ZoomClientConfig.query.get(1)
             if not zoom_config:
-                raise ValueError("Zoom client configuration not found in the database")
+                raise ValueError("Zoom client configuration not found")
         return ZoomClient()
     except Exception as e:
         logger.log(f"Error creating ZoomClient: {str(e)}")
         raise
 
-def get_meeting_recordings(meeting_id: str) -> Dict:
-    """
-    Retrieve the cloud recordings for a specific meeting.
-    """
-    try:
-        verify_access_key()
-        client = get_zoom_client()
-        endpoint = f"meetings/{meeting_id}/recordings"
-        logger.log(f"Getting recordings for meeting {meeting_id}")
-        return client._make_request("GET", endpoint)
-    except ZoomAuthenticationError as auth_err:
-        logger.log(f"Zoom authentication error: {str(auth_err)}")
-        return jsonify({
-            "error": "Zoom Authentication Error",
-            "message": str(auth_err),
-            "details": "Please check your Zoom credentials and ensure your Marketplace App is activated."
-        }), 401
-    except Exception as e:
-        logger.log(f"Error retrieving meeting recordings: {str(e)}")
-        return jsonify({
-            "error": "Internal Server Error",
-            "message": "An unexpected error occurred while retrieving meeting recordings."
-        }), 500
-
-def get_meeting_details(meeting_id: str) -> Dict:
-    """
-    Retrieve details for a specific meeting, including potential LMS context.
-    """
-    client = get_zoom_client()
-    endpoint = f"meetings/{meeting_id}"
-    meeting_details = client._make_request("GET", endpoint)
-
-    # Look for course ID in various potential locations
-    course_id = None
-
-    # Check custom fields
-    custom_fields = meeting_details.get('settings', {}).get('custom_fields', [])
-    for field in custom_fields:
-        if field.get('name', '').lower() in ['course_id', 'canvas_course_id', 'lms_course_id']:
-            course_id = field.get('value')
-            break
-
-    # Check tracking fields
-    tracking_fields = meeting_details.get('tracking_fields', [])
-    for field in tracking_fields:
-        if field.get('field', '').lower() in ['course_id', 'canvas_course_id', 'lms_course_id']:
-            course_id = field.get('value')
-            break
-
-    # Check topic and agenda for course ID pattern
-    topic = meeting_details.get('topic', '')
-    agenda = meeting_details.get('agenda', '')
-    for text in [topic, agenda]:
-        match = re.search(r'course[\s_-]?id:?\s*(\w+)', text, re.IGNORECASE)
-        if match:
-            course_id = match.group(1)
-            break
-
-    meeting_details['lms_course_id'] = course_id
-    return meeting_details
-
-def find_transcript_file(recording_files: List[Dict]) -> Optional[Dict]:
-    """
-    Find the transcript file in the list of recording files.
-    """
-    for file in recording_files:
-        if file.get("file_type") == "TRANSCRIPT":
-            return file
-    return None
-
-def get_transcript_content(transcript_download_url: str, access_token: str) -> Optional[str]:
-    """
-    Download and return the content of the transcript file.
-    """
-    headers = {"Authorization": f"Bearer {access_token}"}
-    try:
-        response = requests.get(transcript_download_url, headers=headers)
-        response.raise_for_status()
-        return response.text
-    except requests.RequestException as e:
-        logger.log(f"Error retrieving transcript: {str(e)}")
-        return None
-
-# def get_meeting_transcript(meeting_id: str) -> Optional[str]:
-#     """
-#     Retrieve the transcript for a specific meeting.
-#     """
-#     client = get_zoom_client()
-#     recordings = get_meeting_recordings(meeting_id)
-#     recording_files = recordings.get("recording_files", [])
-    
-#     transcript_file = find_transcript_file(recording_files)
-#     if not transcript_file:
-#         return None
-    
-#     download_url = transcript_file.get("download_url")
-#     if not download_url:
-#         return None
-    
-#     return get_transcript_content(download_url, client.oauth.get_access_token())
 
 def validate_access_key(apikey, required_scopes=None, request=None):
     with app.app_context():
         zoom_config = ZoomClientConfig.query.get(1)
         if zoom_config and zoom_config.require_access_key:
             if apikey and apikey == zoom_config.access_key:
-                return {'sub': 'zoom_api_user'}
+                return {"sub": "zoom_api_user"}
     return None
+
 
 def verify_access_key():
     with app.app_context():
@@ -205,122 +115,258 @@ def verify_access_key():
             if not validate_access_key(access_key):
                 abort(401, description="Invalid or missing Access Key")
 
-def get_meeting_transcript(meeting_id: str) -> Dict[str, Optional[List[Dict[str, str]]]]:
+
+def get_meeting_recordings(meeting_id: str) -> Dict:
     """
-    Retrieve the transcript for a specific meeting and convert it to JSON format.
+    Retrieve the recordings for a specific meeting.
+    """
+    try:
+        verify_access_key()
+        client = get_zoom_client()
+
+        recordings = client._make_request("GET", f"meetings/{meeting_id}/recordings")
+        return recordings
+
+    except Exception as e:
+        logger.log(f"Error retrieving meeting recordings: {str(e)}")
+        return jsonify({"error": "Internal Server Error", "message": str(e)}), 500
+
+
+def get_meeting_transcript(meeting_id: str) -> Dict:
+    """
+    Retrieve the transcript for a specific meeting.
     """
     try:
         verify_access_key()
         client = get_zoom_client()
         recordings = get_meeting_recordings(meeting_id)
-
-        # Check if recordings is a tuple (error response) or a dict (success response)
-        if isinstance(recordings, tuple):
-            # This is an error response, return it directly
-            return recordings
-
         recording_files = recordings.get("recording_files", [])
-        
-        transcript_file = find_transcript_file(recording_files)
+
+        transcript_file = next(
+            (file for file in recording_files if file.get("file_type") == "TRANSCRIPT"),
+            None,
+        )
         if not transcript_file:
-            logger.log(f"No transcript file found for meeting {meeting_id}")
-            return {"transcript": None}
-        
-        download_url = transcript_file.get("download_url")
-        if not download_url:
-            logger.log(f"No download URL found for transcript of meeting {meeting_id}")
-            return {"transcript": None}
-        
-        webvtt_content = get_transcript_content(download_url, client.oauth.get_access_token())
-        if not webvtt_content:
-            logger.log(f"Failed to retrieve transcript content for meeting {meeting_id}")
-            return {"transcript": None}
-        
-        json_transcript = json.loads(webvtt_to_json(webvtt_content))
-        logger.log(f"Parsed JSON transcript for meeting {meeting_id}")
-        
-        return {"transcript": json_transcript}
-    except ZoomAuthenticationError as auth_err:
-        logger.log(f"Zoom authentication error: {str(auth_err)}")
-        return jsonify({
-            "error": "Zoom Authentication Error",
-            "message": str(auth_err),
-            "details": "Please check your Zoom credentials and ensure your Marketplace App is activated."
-        }), 401
+            return {"transcript": None, "message": "No transcript found"}
+
+        transcript_url = transcript_file.get("download_url")
+        if not transcript_url:
+            return {"transcript": None, "message": "No transcript URL available"}
+
+        transcript_content = get_transcript_content(
+            transcript_url, client.oauth.get_access_token()
+        )
+        if not transcript_content:
+            return {
+                "transcript": None,
+                "message": "Failed to retrieve transcript content",
+            }
+
+        return {"transcript": json.loads(webvtt_to_json(transcript_content))}
+
     except Exception as e:
         logger.log(f"Error retrieving meeting transcript: {str(e)}")
-        return jsonify({
-            "error": "Internal Server Error",
-            "message": "An unexpected error occurred while retrieving the meeting transcript."
-        }), 500
+        return jsonify({"error": "Internal Server Error", "message": str(e)}), 500
 
-def extract_canvas_course_id(meeting_details: Dict) -> Optional[str]:
-    """
-    Attempt to extract Canvas course ID from meeting details.
-    """
-    # Check the topic for course ID
-    topic = meeting_details.get("topic", "")
-    topic_match = re.search(r"Canvas Course ID: (\d+)", topic)
-    if topic_match:
-        return topic_match.group(1)
-    
-    # Check the agenda for course ID
-    agenda = meeting_details.get("agenda", "")
-    agenda_match = re.search(r"Canvas Course ID: (\d+)", agenda)
-    if agenda_match:
-        return agenda_match.group(1)
-    
-    # Check custom attributes if available
-    settings = meeting_details.get("settings", {})
-    custom_attributes = settings.get("custom_keys", [])
-    for attr in custom_attributes:
-        if attr.get("key") == "canvas_course_id":
-            return attr.get("value")
-    
-    return None
 
-def get_meeting_with_lms_context(meeting_id: str) -> Dict:
+def get_instructor_recordings(instructor_id: str, course_id: str) -> Dict:
     """
-    Retrieve meeting details and attempt to extract LMS context.
+    Retrieve all recordings for an instructor filtered by course ID using meeting reports.
+    The instructor_id parameter can be either an email or login ID from the LTI launch.
     """
-    verify_access_key()
-    client = get_zoom_client()
-    meeting_details = get_meeting_details(meeting_id)
-    
-    result = {
-        "meeting_details": meeting_details,
-        "canvas_course_id": meeting_details.get('lms_course_id')
-    }
-    
-    return result
+    try:
+        verify_access_key()
+        client = get_zoom_client()
+
+        start_date = datetime(2020, 1, 1)
+        end_date = datetime.now()
+
+        all_recordings = []
+        current_date = end_date
+
+        while current_date >= start_date:
+            range_end = current_date.strftime("%Y-%m-%d")
+            range_start = (current_date - timedelta(days=30)).strftime("%Y-%m-%d")
+
+            try:
+                recordings_response = client._make_request(
+                    "GET",
+                    f"users/{instructor_id}/recordings",
+                    params={"page_size": 300, "from": range_start, "to": range_end},
+                )
+
+                all_recordings.extend(recordings_response.get("meetings", []))
+
+            except HTTPError as e:
+                if e.response.status_code == 404:
+                    try:
+                        user = client._make_request("GET", f"users/{instructor_id}")
+                        user_id = user.get("id")
+                        recordings_response = client._make_request(
+                            "GET",
+                            f"users/{user_id}/recordings",
+                            params={
+                                "page_size": 300,
+                                "from": range_start,
+                                "to": range_end,
+                            },
+                        )
+
+                        all_recordings.extend(recordings_response.get("meetings", []))
+
+                    except HTTPError:
+                        logger.log(
+                            f"No Zoom user found for identifier: {instructor_id}"
+                        )
+                        return {"recordings": [], "message": "No Zoom user found"}
+                else:
+                    raise
+
+            current_date = current_date - timedelta(days=30)
+
+        filtered_recordings = []
+        for recording in all_recordings:
+            meeting_id = recording.get("id")
+            uuid = recording.get("uuid", "")
+
+            try:
+                meeting_report = client._make_request(
+                    "GET", f"report/meetings/{meeting_id}"
+                )
+
+            except HTTPError as meeting_error:
+                error_response = json.loads(meeting_error.response.text)
+                if (
+                    meeting_error.response.status_code == 404
+                    and error_response.get("code") == 3001
+                ):
+                    try:
+                        meeting_report = client._make_request(
+                            "GET", f"report/meetings/{uuid}"
+                        )
+                    except HTTPError:
+                        continue
+                else:
+                    continue
+
+            tracking_fields = meeting_report.get("tracking_fields", [])
+            canvas_course_field = next(
+                (
+                    field
+                    for field in tracking_fields
+                    if field.get("field") == "Canvas Course"
+                ),
+                None,
+            )
+
+            if canvas_course_field and str(canvas_course_field.get("value", "")) == str(
+                course_id
+            ):
+                recording_info = {
+                    "id": recording.get("id"),
+                    "uuid": recording.get("uuid"),
+                    "topic": recording.get("topic"),
+                    "start_time": recording.get("start_time"),
+                    "duration": recording.get("duration"),
+                    "recording_files": [
+                        {
+                            "id": f.get("id"),
+                            "file_type": f.get("file_type"),
+                            "recording_type": f.get("recording_type"),
+                            "download_url": f.get("download_url"),
+                        }
+                        for f in recording.get("recording_files", [])
+                        if f.get("file_type") in ["MP4", "TRANSCRIPT"]
+                    ],
+                }
+                filtered_recordings.append(recording_info)
+
+        return {"recordings": filtered_recordings}
+
+    except Exception as e:
+        logger.log(f"Error retrieving instructor recordings: {str(e)}")
+        return jsonify({"error": "Internal Server Error", "message": str(e)}), 500
+
+
+def get_recording_transcript(recording_id: str) -> Dict:
+    """
+    Get transcript for a specific recording.
+    """
+    try:
+        verify_access_key()
+        client = get_zoom_client()
+
+        try:
+            recording = client._make_request("GET", f"recordings/{recording_id}")
+
+            transcript_file = next(
+                (
+                    file
+                    for file in recording.get("recording_files", [])
+                    if file.get("file_type") == "TRANSCRIPT"
+                ),
+                None,
+            )
+
+            if not transcript_file:
+                return {"transcript": None, "message": "No transcript available"}
+
+            transcript_content = get_transcript_content(
+                transcript_file["download_url"], client.oauth.get_access_token()
+            )
+
+            if not transcript_content:
+                return {"transcript": None, "message": "Failed to retrieve transcript"}
+
+            return {"transcript": json.loads(webvtt_to_json(transcript_content))}
+
+        except HTTPError as e:
+            if e.response.status_code == 404:
+                return {"transcript": None, "message": "Recording not found"}
+            raise
+
+    except Exception as e:
+        logger.log(f"Error retrieving recording transcript: {str(e)}")
+        return jsonify({"error": "Internal Server Error", "message": str(e)}), 500
+
+
+def get_transcript_content(
+    transcript_download_url: str, access_token: str
+) -> Optional[str]:
+    """Download and return the content of the transcript file."""
+    headers = {"Authorization": f"Bearer {access_token}"}
+    try:
+        response = requests.get(transcript_download_url, headers=headers)
+        response.raise_for_status()
+        return response.text
+    except requests.RequestException as e:
+        logger.log(f"Error retrieving transcript: {str(e)}")
+        return None
+
 
 def webvtt_to_json(webvtt_content: str) -> str:
-    captions = re.split(r'\r\n\r\n', webvtt_content.strip())
-    
+    """Convert WebVTT format to JSON."""
+    captions = re.split(r"\r\n\r\n", webvtt_content.strip())
+
     json_data = []
-    
+
     for caption in captions:
-        if caption.strip().upper() == 'WEBVTT':
+        if caption.strip().upper() == "WEBVTT":
             continue
-        
-        lines = caption.split('\r\n')
+
+        lines = caption.split("\r\n")
         if len(lines) >= 3:
             index = lines[0]
             timing = lines[1]
-            text = ' '.join(lines[2:])
-            
+            text = " ".join(lines[2:])
+
             try:
-                start, end = timing.split(' --> ')
+                start, end = timing.split(" --> ")
             except ValueError:
-                continue  # Skip this caption if timing is malformed
-            
-            caption_obj = {
-                "index": index,
-                "start": start,
-                "end": end,
-                "text": text
-            }
-            
+                continue
+
+            caption_obj = {"index": index, "start": start, "end": end, "text": text}
+
             json_data.append(caption_obj)
-    
-    return json.dumps(json_data, indent=2)
+
+    return json.dumps(json_data)

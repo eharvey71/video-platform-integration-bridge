@@ -3,6 +3,7 @@ build_prod_db.py
 build_*_kaltura.py
 build_eric.py
 build_lc*.py
+build_bryan.py
 logs/*
 !logs/.gitkeep
 

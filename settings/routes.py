@@ -62,7 +62,7 @@ def adduser():
         db.session.commit()
 
         flash('New user ' + username + ' added', 'success')
-        return redirect(url_for('adduser'))
+        return redirect(url_for('settings.adduser'))
     
     elif request.method == 'GET':
         return render_template('adduser.html')

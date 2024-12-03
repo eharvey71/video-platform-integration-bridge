@@ -21,6 +21,85 @@ security:
   - AccessKeyAuth: []
 
 paths:
+  /instructor/recordings:
+    get:
+      summary: Get recordings for instructor
+      operationId: src.zoom_handlers.get_instructor_recordings
+      parameters:
+        - name: instructor_id
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Instructor's email or login ID from LTI launch
+        - name: course_id
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Course ID from LTI launch to match against tracking fields
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  recordings:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: string
+                        uuid:
+                          type: string
+                        topic:
+                          type: string
+                        start_time:
+                          type: string
+                        duration:
+                          type: integer
+                        recording_files:
+                          type: array
+                          items:
+                            type: object
+                            properties:
+                              id:
+                                type: string
+                              file_type:
+                                type: string
+                                enum: [MP4, TRANSCRIPT]
+                              recording_type:
+                                type: string
+                              download_url:
+                                type: string
+
+  /meeting/{meeting_id}/recordings:
+    get:
+      summary: Get meeting recordings
+      operationId: src.zoom_handlers.get_meeting_recordings
+      parameters:
+        - name: meeting_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Meeting ID to fetch recordings
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  recordings:
+                    type: array
+                    items:
+                      type: object
+
   /meeting/{meeting_id}/transcript:
     get:
       summary: Get meeting transcript
@@ -31,6 +110,7 @@ paths:
           required: true
           schema:
             type: string
+          description: Meeting ID to fetch transcript
       responses:
         '200':
           description: Successful response
@@ -52,71 +132,3 @@ paths:
                           type: string
                         text:
                           type: string
-        '401':
-          description: Unauthorized
-        '404':
-          description: Transcript not found
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  transcript:
-                    type: object
-                    nullable: true
-
-  /meeting/{meeting_id}/recordings:
-    get:
-      summary: Get meeting recordings
-      operationId: src.zoom_handlers.get_meeting_recordings
-      parameters:
-        - name: meeting_id
-          in: path
-          required: true
-          schema:
-            type: string
-      responses:
-        '200':
-          description: Successful response
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  recordings:
-                    type: array
-                    items:
-                      type: object
-
-  /meeting/{meeting_id}/lms-context:
-    get:
-      summary: Get meeting details with LMS context
-      description: Retrieve meeting details and attempt to extract LMS context
-      operationId: src.zoom_handlers.get_meeting_with_lms_context
-      parameters:
-        - name: meeting_id
-          in: path
-          required: true
-          schema:
-            type: string
-          description: The ID of the Zoom meeting
-      responses:
-        '200':
-          description: Successful response
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  meeting_details:
-                    type: object
-                    description: Detailed information about the meeting
-                  canvas_course_id:
-                    type: string
-                    description: The extracted Canvas course ID, if available
-        '400':
-          description: Bad request
-        '404':
-          description: Meeting not found
-        '500':
-          description: Internal server error
