@@ -169,7 +169,7 @@ def get_meeting_transcript(meeting_id: str) -> Dict:
         return jsonify({"error": "Internal Server Error", "message": str(e)}), 500
 
 
-def get_instructor_recordings(instructor_id: str, course_id: str) -> Dict:
+def get_instructor_recordings(instructor_id: str, course_id: str = None) -> Dict:
     """
     Retrieve all recordings for an instructor filtered by course ID using meeting reports.
     The instructor_id parameter can be either an email or login ID from the LTI launch.
@@ -177,7 +177,14 @@ def get_instructor_recordings(instructor_id: str, course_id: str) -> Dict:
     try:
         verify_access_key()
         client = get_zoom_client()
-        logger.log(f"Starting recording search for instructor: {instructor_id}")
+        logger.log(
+            f"Starting recording search for instructor: {instructor_id}"
+            + (
+                f" with course filter: {course_id}"
+                if course_id
+                else " (no course filter)"
+            )
+        )
 
         start_date = datetime(2020, 1, 1)
         end_date = datetime.now()
@@ -269,22 +276,9 @@ def get_instructor_recordings(instructor_id: str, course_id: str) -> Dict:
                     logger.log(f"Failed to get report for meeting {meeting_id}")
                     continue
 
-            tracking_fields = meeting_report.get("tracking_fields", [])
-            canvas_course_field = next(
-                (
-                    field
-                    for field in tracking_fields
-                    if field.get("field") == "Canvas Course"
-                ),
-                None,
-            )
-
-            if canvas_course_field and str(canvas_course_field.get("value", "")) == str(
-                course_id
-            ):
-                logger.log(
-                    f"Found matching course ID {course_id} for meeting {meeting_id}"
-                )
+            # If no course_id specified, include all recordings
+            if not course_id:
+                logger.log(f"Including meeting {meeting_id} (no course filter)")
                 recording_info = {
                     "id": recording.get("id"),
                     "uuid": recording.get("uuid"),
@@ -304,10 +298,47 @@ def get_instructor_recordings(instructor_id: str, course_id: str) -> Dict:
                 }
                 filtered_recordings.append(recording_info)
             else:
-                logger.log(f"No matching course ID for meeting {meeting_id}")
+                # Check course ID match
+                tracking_fields = meeting_report.get("tracking_fields", [])
+                canvas_course_field = next(
+                    (
+                        field
+                        for field in tracking_fields
+                        if field.get("field") == "Canvas Course"
+                    ),
+                    None,
+                )
+
+                if canvas_course_field and str(
+                    canvas_course_field.get("value", "")
+                ) == str(course_id):
+                    logger.log(
+                        f"Found matching course ID {course_id} for meeting {meeting_id}"
+                    )
+                    recording_info = {
+                        "id": recording.get("id"),
+                        "uuid": recording.get("uuid"),
+                        "topic": recording.get("topic"),
+                        "start_time": recording.get("start_time"),
+                        "duration": recording.get("duration"),
+                        "recording_files": [
+                            {
+                                "id": f.get("id"),
+                                "file_type": f.get("file_type"),
+                                "recording_type": f.get("recording_type"),
+                                "download_url": f.get("download_url"),
+                            }
+                            for f in recording.get("recording_files", [])
+                            if f.get("file_type") in ["MP4", "TRANSCRIPT"]
+                        ],
+                    }
+                    filtered_recordings.append(recording_info)
+                else:
+                    logger.log(f"No matching course ID for meeting {meeting_id}")
 
         logger.log(
-            f"Found {len(filtered_recordings)} recordings matching course ID {course_id}"
+            f"Found {len(filtered_recordings)} recordings"
+            + (f" matching course ID {course_id}" if course_id else " for instructor")
         )
         return {"recordings": filtered_recordings}
 

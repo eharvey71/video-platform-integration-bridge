@@ -34,10 +34,10 @@ paths:
           description: Instructor's email or login ID from LTI launch
         - name: course_id
           in: query
-          required: true
+          required: false
           schema:
             type: string
-          description: Course ID from LTI launch to match against tracking fields
+          description: Optional Course ID from LTI launch to match against tracking fields
       responses:
         '200':
           description: Successful response
