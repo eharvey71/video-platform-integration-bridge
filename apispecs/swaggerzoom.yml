@@ -39,7 +39,7 @@ paths:
             type: string
           description: Optional Course ID from LTI launch to match against tracking fields
       responses:
-        '200':
+        "200":
           description: Successful response
           content:
             application/json:
@@ -76,6 +76,57 @@ paths:
                               download_url:
                                 type: string
 
+  /recording/transcript:
+    get:
+      summary: Get recording transcript by download URL
+      operationId: src.zoom_handlers.get_recording_transcript_by_url
+      parameters:
+        - name: download_url
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Zoom transcript download URL (must be a valid zoom.us URL)
+      responses:
+        "200":
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  transcript:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        index:
+                          type: string
+                        start:
+                          type: string
+                        end:
+                          type: string
+                        text:
+                          type: string
+        "400":
+          description: Bad Request - Invalid or missing download URL
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+        "401":
+          description: Unauthorized - Invalid or missing access key
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+
   /meeting/{meeting_id}/recordings:
     get:
       summary: Get meeting recordings
@@ -88,7 +139,7 @@ paths:
             type: string
           description: Meeting ID to fetch recordings
       responses:
-        '200':
+        "200":
           description: Successful response
           content:
             application/json:
@@ -112,7 +163,7 @@ paths:
             type: string
           description: Meeting ID to fetch transcript
       responses:
-        '200':
+        "200":
           description: Successful response
           content:
             application/json:

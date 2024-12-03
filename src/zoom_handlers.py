@@ -345,6 +345,45 @@ def get_instructor_recordings(instructor_id: str, course_id: str = None) -> Dict
     except Exception as e:
         logger.log(f"Error retrieving instructor recordings: {str(e)}")
         return jsonify({"error": "Internal Server Error", "message": str(e)}), 500
+    
+def validate_zoom_url(url: str) -> bool:
+    """
+    Validate that the provided URL is a legitimate Zoom URL.
+    """
+    try:
+        return bool(re.match(r'^https://([a-zA-Z0-9-]+\.)?zoom.us/', url))
+    except:
+        return False
+    
+def get_recording_transcript_by_url(download_url: str) -> Dict:
+    """
+    Get transcript for a specific recording using its download URL.
+    """
+    try:
+        verify_access_key()
+        
+        if not download_url:
+            return {"error": "Missing download URL"}, 400
+            
+        if not validate_zoom_url(download_url):
+            logger.log(f"Invalid Zoom URL attempted: {download_url}")
+            return {"error": "Invalid download URL"}, 400
+
+        client = get_zoom_client()
+        
+        transcript_content = get_transcript_content(
+            download_url, 
+            client.oauth.get_access_token()
+        )
+
+        if not transcript_content:
+            return {"transcript": None, "message": "Failed to retrieve transcript"}
+
+        return {"transcript": json.loads(webvtt_to_json(transcript_content))}
+
+    except Exception as e:
+        logger.log(f"Error retrieving recording transcript: {str(e)}")
+        return jsonify({"error": "Internal Server Error", "message": str(e)}), 500
 
 
 def get_recording_transcript(recording_id: str) -> Dict:
