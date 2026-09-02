@@ -187,9 +187,39 @@ Step-by-Step Full Deployment
 The integration bridge is built using the following frameworks and libaries:
 
 * Connexion 3 Python web framework (with Flask, Uvicorn, Swagger-UI extras)
-* Bootstrap 5
+* React 18 + TypeScript, built with Vite, for the admin interface
 * SQL Alchemy ORM
 * Additional Swagger-UI Bundle (when additional customization is required)
+
+Building the admin interface
+----------------------------
+
+The admin screens are a single-page app under ``frontend/`` rather than
+server-rendered templates. Flask serves the built bundle, so a deployment needs
+it built first:
+
+.. code-block::
+
+    cd frontend
+    npm install
+    npm run build
+
+That writes ``frontend/dist/``, which Flask serves for any route it does not
+own. The Dockerfile does this in a separate ``node:22-slim`` stage, so a
+container build needs no extra step -- and the runtime image carries only the
+bundle, not the Node toolchain.
+
+For development, run Vite's dev server alongside Flask:
+
+.. code-block::
+
+    uvicorn app:app --port 8000      # one terminal
+    cd frontend && npm run dev       # another; serves on :5173
+
+Vite proxies the API paths through to Flask so the browser sees a single origin
+and the session cookie works unchanged. This is why ``CORS_ALLOWED_ORIGINS``
+ships empty: the SPA is same-origin in both development and production, and
+nothing needs a cross-origin grant.
 
 More to come ...
 

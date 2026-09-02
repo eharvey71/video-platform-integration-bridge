@@ -1,13 +1,12 @@
 import pathlib, os, secrets, warnings
 from dotenv import load_dotenv
-from datetime import datetime, timedelta
+from datetime import timedelta
 from connexion import FlaskApp #, json_schema
 from connexion.options import SwaggerUIOptions
 from connexion.middleware import MiddlewarePosition
 from starlette.middleware.cors import CORSMiddleware
 from flask_sqlalchemy import SQLAlchemy
 from flask_marshmallow import Marshmallow
-from flask_bootstrap import Bootstrap5
 from flask_login import LoginManager
 
 basedir = pathlib.Path(__file__).parent.resolve()
@@ -58,9 +57,12 @@ if CORS_ALLOWED_ORIGINS:
 app = connex_app.app
 
 app.config["DEBUG"] = DEBUG
-app.config["SQLALCHEMY_DATABASE_URI"] = f"sqlite:///{basedir / 'database/epib.db'}"
+# Overridable so tests (and non-SQLite deployments) do not have to reach into
+# the module after the extension has already bound an engine to this URI.
+app.config["SQLALCHEMY_DATABASE_URI"] = os.getenv(
+    "DATABASE_URL", f"sqlite:///{basedir / 'database/epib.db'}"
+)
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
-app.config["BOOTSTRAP_BOOTSWATCH_THEME"] = "darkly"
 
 
 def _require_secret(env_var):
@@ -107,25 +109,8 @@ app.config['OKTA_CLIENT_SECRET'] = os.getenv('OKTA_CLIENT_SECRET')
 app.config['OKTA_DOMAIN'] = os.getenv('OKTA_DOMAIN')
 
 
-@app.template_filter("datetimeformat")
-def datetime_format(timestamp):
-    realdate = datetime.utcfromtimestamp(timestamp).strftime("%m-%d-%Y %H:%M:%S")
-    return realdate
-
-@app.template_filter("secstohours")
-def datetime_format(seconds):
-    hours = seconds // 3600
-    return hours
-
-@app.template_filter("stripwhitespace")
-def strip_whitespace(s):
-    sclean = s.replace(" ", "")
-    print(sclean)
-    return sclean
-
 db = SQLAlchemy(app)
 ma = Marshmallow(app)
-bootstrap = Bootstrap5(app)
 
 login_manager = LoginManager()
 login_manager.init_app(app)

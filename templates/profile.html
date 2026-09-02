@@ -1,9 +1,0 @@
-{% extends "base.html" %}
-
-{% block content %}
-<h3 class="title">
-  Greetings, {{ username }}!
-</h3>
-<p>Role: {{ role }}</p>
-<a href="{{ url_for('auth.token') }}">Get a token</a>
-{% endblock %}
