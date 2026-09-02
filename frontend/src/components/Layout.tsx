@@ -4,22 +4,35 @@ import { useEffect, useState } from 'react'
 import { useSession } from '../auth/SessionProvider'
 
 const THEME_KEY = 'vpib-theme'
-type Theme = 'system' | 'light' | 'dark'
+type Theme = 'light' | 'dark' | 'system'
+
+// Light unless someone has chosen otherwise. "system" is opt-in rather than the
+// default, so a first visit is white regardless of the viewer's OS setting.
+const DEFAULT_THEME: Theme = 'light'
+const THEME_CYCLE: Theme[] = ['light', 'dark', 'system']
+const THEME_LABELS: Record<Theme, string> = { light: 'Light', dark: 'Dark', system: 'Auto' }
 
 function useTheme() {
   const [theme, setTheme] = useState<Theme>(() => {
     try {
-      return (localStorage.getItem(THEME_KEY) as Theme) ?? 'system'
+      const stored = localStorage.getItem(THEME_KEY) as Theme | null
+      return stored && THEME_CYCLE.includes(stored) ? stored : DEFAULT_THEME
     } catch {
       // Private browsing and blocked site data both throw on access.
-      return 'system'
+      return DEFAULT_THEME
     }
   })
 
   useEffect(() => {
     const root = document.documentElement
-    if (theme === 'system') root.removeAttribute('data-theme')
-    else root.setAttribute('data-theme', theme)
+    if (theme === 'system') {
+      root.removeAttribute('data-theme')
+      // Hand native widgets and scrollbars back to the OS preference.
+      root.style.colorScheme = 'light dark'
+    } else {
+      root.setAttribute('data-theme', theme)
+      root.style.colorScheme = theme
+    }
     try {
       localStorage.setItem(THEME_KEY, theme)
     } catch {
@@ -27,13 +40,15 @@ function useTheme() {
     }
   }, [theme])
 
-  return { theme, setTheme }
+  const cycle = () => setTheme(THEME_CYCLE[(THEME_CYCLE.indexOf(theme) + 1) % THEME_CYCLE.length])
+
+  return { theme, cycle, label: THEME_LABELS[theme] }
 }
 
 export function Layout() {
   const { session, logout } = useSession()
   const navigate = useNavigate()
-  const { theme, setTheme } = useTheme()
+  const { theme, cycle, label } = useTheme()
 
   const features = session?.features ?? { kaltura: false, canvas: false, zoom: false }
   const title = session?.title ?? 'Integration Bridge'
@@ -42,10 +57,6 @@ export function Layout() {
   const onLogout = async () => {
     await logout()
     navigate('/login', { replace: true })
-  }
-
-  const cycleTheme = () => {
-    setTheme(theme === 'system' ? 'light' : theme === 'light' ? 'dark' : 'system')
   }
 
   return (
@@ -96,10 +107,10 @@ export function Layout() {
           <button
             type="button"
             className="btn btn-sm btn-ghost"
-            onClick={cycleTheme}
-            title={`Theme: ${theme}`}
+            onClick={cycle}
+            title={`Theme: ${theme}. Click to change.`}
           >
-            {theme === 'system' ? 'Auto' : theme === 'light' ? 'Light' : 'Dark'}
+            {label}
           </button>
           <NavLink to="/profile" className="nav-link">
             {session?.user?.username ?? 'Account'}
