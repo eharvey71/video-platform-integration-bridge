@@ -1,9 +1,8 @@
 from flask import Blueprint, request, render_template, redirect, url_for, flash, jsonify, session
 from flask_login import login_user, logout_user, login_required, current_user
-from src.auth_handler import check_password_hash, get_user_credentials, generate_token
+from src.auth_handler import check_password_hash, generate_token
 from src.models import User
 import src.logger as logger
-import base64
 from src.oauth2_config import oauth, oauth2_required
 
 auth_bp = Blueprint('auth', __name__, template_folder='templates')
@@ -59,7 +58,7 @@ def json_login_post():
 
     logger.log("JSON login attempt succeeded for user: " + username)
     login_user(user)
-    token = generate_token(user.id)
+    token = generate_token(user.username)
 
     return jsonify({"token": token})
 
@@ -72,7 +71,13 @@ def github_callback():
         user_info = oauth.github.get('user', token=token).json()
         #logger.log(f"GitHub user info: {user_info}")
         
-        user = User.query.filter_by(email=user_info['email']).first()
+        email = user_info.get('email')
+        if not email:
+            flash('Your GitHub account does not expose a verified email address.', 'error')
+            logger.log("GitHub login failed: provider returned no email address")
+            return redirect(url_for('auth.login'))
+
+        user = User.query.filter_by(email=email).first()
         if user:
             login_user(user)
             session['oauth_token'] = token
@@ -81,7 +86,7 @@ def github_callback():
             return redirect(url_for('logpage'))
         else:
             flash('No user found with this email. Please contact your administrator.', 'error')
-            logger.log(f"GitHub login failed: No user found for email {user_info['email']}")
+            logger.log(f"GitHub login failed: No user found for email {email}")
             return redirect(url_for('auth.login'))
     except Exception as e:
         logger.log(f"Error in GitHub callback: {str(e)}")
@@ -90,10 +95,21 @@ def github_callback():
 
 @auth_bp.route('/okta/callback')
 def okta_callback():
-    token = oauth.okta.authorize_access_token()
-    user_info = oauth.okta.get('v1/userinfo', token=token).json()
-    
-    user = User.query.filter_by(email=user_info['email']).first()
+    try:
+        token = oauth.okta.authorize_access_token()
+        user_info = oauth.okta.get('v1/userinfo', token=token).json()
+    except Exception as e:
+        logger.log(f"Error in Okta callback: {str(e)}")
+        flash('An error occurred during Okta authentication.', 'error')
+        return redirect(url_for('auth.login'))
+
+    email = user_info.get('email')
+    if not email:
+        flash('Your Okta account does not expose an email address.', 'error')
+        logger.log("Okta login failed: provider returned no email address")
+        return redirect(url_for('auth.login'))
+
+    user = User.query.filter_by(email=email).first()
     if user:
         login_user(user)
         session['oauth_token'] = token
@@ -102,7 +118,7 @@ def okta_callback():
         return redirect(url_for('logpage'))
     else:
         flash('No user found with this email. Please contact your administrator.', 'error')
-        logger.log(f"Okta login failed: No user found for email {user_info['email']}")
+        logger.log(f"Okta login failed: No user found for email {email}")
         return redirect(url_for('auth.login'))
 
 @auth_bp.route('/logout')
@@ -113,19 +129,9 @@ def logout():
     session.pop('oauth_provider', None)
     return redirect(url_for('auth.login'))
 
-# route for internal authorizations needed by JS
-# performing requests. Admin auth is required
-# for additional session validation.
-@auth_bp.route('/get_auth_token')
-@login_required
-def get_auth_token():
-    username, password = get_user_credentials(username=current_user.username)
-    token = base64.b64encode(f"{username}:{password}".encode()).decode('utf-8')
-    return jsonify({'token': token})
-
+# Short-lived bearer token for the browser UI's own XHR calls against the
+# Connexion-served API. Requires an established session.
 @auth_bp.route('/token')
 @login_required
 def token():
-    username, password = get_user_credentials(username=current_user.username)
-    jwt = generate_token(username)
-    return jsonify({'token': jwt})
+    return jsonify({'token': generate_token(current_user.username)})

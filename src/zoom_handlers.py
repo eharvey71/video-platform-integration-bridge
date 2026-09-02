@@ -6,11 +6,14 @@ import requests
 from requests.exceptions import HTTPError
 from typing import Dict, List, Optional
 from datetime import datetime, timezone, timedelta
+from urllib.parse import urlparse
 import re
+import secrets as _secrets
 
 
 class ZoomOAuth:
     TOKEN_URL = "https://zoom.us/oauth/token"
+    HTTP_TIMEOUT = 30
 
     def __init__(self):
         self.config = self.get_config()
@@ -41,7 +44,9 @@ class ZoomOAuth:
         }
 
         try:
-            response = requests.post(self.TOKEN_URL, data=data)
+            response = requests.post(
+                self.TOKEN_URL, data=data, timeout=self.HTTP_TIMEOUT
+            )
             response.raise_for_status()
             token_data = response.json()
 
@@ -61,6 +66,7 @@ class ZoomOAuth:
 
 class ZoomClient:
     BASE_URL = "https://api.zoom.us/v2"
+    HTTP_TIMEOUT = 30
 
     def __init__(self):
         self.oauth = ZoomOAuth()
@@ -80,7 +86,12 @@ class ZoomClient:
     ) -> Dict:
         url = f"{self.BASE_URL}/{endpoint}"
         response = requests.request(
-            method, url, headers=self._get_headers(), params=params, json=data
+            method,
+            url,
+            headers=self._get_headers(),
+            params=params,
+            json=data,
+            timeout=self.HTTP_TIMEOUT,
         )
         response.raise_for_status()
         return response.json()
@@ -102,7 +113,11 @@ def validate_access_key(apikey, required_scopes=None, request=None):
     with app.app_context():
         zoom_config = ZoomClientConfig.query.get(1)
         if zoom_config and zoom_config.require_access_key:
-            if apikey and apikey == zoom_config.access_key:
+            # constant-time compare so a caller cannot recover the key byte by byte
+            # from response timing
+            if apikey and zoom_config.access_key and _secrets.compare_digest(
+                str(apikey), str(zoom_config.access_key)
+            ):
                 return {"sub": "zoom_api_user"}
     return None
 
@@ -129,7 +144,7 @@ def get_meeting_recordings(meeting_id: str) -> Dict:
 
     except Exception as e:
         logger.log(f"Error retrieving meeting recordings: {str(e)}")
-        return jsonify({"error": "Internal Server Error", "message": str(e)}), 500
+        return jsonify({"error": "Internal Server Error"}), 500
 
 
 def get_meeting_transcript(meeting_id: str) -> Dict:
@@ -166,7 +181,7 @@ def get_meeting_transcript(meeting_id: str) -> Dict:
 
     except Exception as e:
         logger.log(f"Error retrieving meeting transcript: {str(e)}")
-        return jsonify({"error": "Internal Server Error", "message": str(e)}), 500
+        return jsonify({"error": "Internal Server Error"}), 500
 
 
 def get_instructor_recordings(instructor_id: str, course_id: str = None) -> Dict:
@@ -344,16 +359,34 @@ def get_instructor_recordings(instructor_id: str, course_id: str = None) -> Dict
 
     except Exception as e:
         logger.log(f"Error retrieving instructor recordings: {str(e)}")
-        return jsonify({"error": "Internal Server Error", "message": str(e)}), 500
+        return jsonify({"error": "Internal Server Error"}), 500
     
+ZOOM_ALLOWED_HOST_SUFFIXES = (".zoom.us",)
+ZOOM_ALLOWED_HOSTS = ("zoom.us",)
+
+
 def validate_zoom_url(url: str) -> bool:
     """
     Validate that the provided URL is a legitimate Zoom URL.
+
+    Parsed rather than regex-matched: the previous pattern left the dot in
+    "zoom.us" unescaped and was unanchored on the host, so hosts like
+    "zoomxus" were accepted and the download URL could be pointed at an
+    attacker-controlled server -- with a live Zoom bearer token attached.
     """
     try:
-        return bool(re.match(r'^https://([a-zA-Z0-9-]+\.)?zoom.us/', url))
-    except:
+        parsed = urlparse(url)
+    except ValueError:
         return False
+
+    if parsed.scheme != "https":
+        return False
+
+    host = (parsed.hostname or "").lower()
+    if not host:
+        return False
+
+    return host in ZOOM_ALLOWED_HOSTS or host.endswith(ZOOM_ALLOWED_HOST_SUFFIXES)
     
 def get_recording_transcript_by_url(download_url: str) -> Dict:
     """
@@ -383,7 +416,7 @@ def get_recording_transcript_by_url(download_url: str) -> Dict:
 
     except Exception as e:
         logger.log(f"Error retrieving recording transcript: {str(e)}")
-        return jsonify({"error": "Internal Server Error", "message": str(e)}), 500
+        return jsonify({"error": "Internal Server Error"}), 500
 
 
 def get_recording_transcript(recording_id: str) -> Dict:
@@ -425,7 +458,7 @@ def get_recording_transcript(recording_id: str) -> Dict:
 
     except Exception as e:
         logger.log(f"Error retrieving recording transcript: {str(e)}")
-        return jsonify({"error": "Internal Server Error", "message": str(e)}), 500
+        return jsonify({"error": "Internal Server Error"}), 500
 
 
 def get_transcript_content(
@@ -434,7 +467,11 @@ def get_transcript_content(
     """Download and return the content of the transcript file."""
     headers = {"Authorization": f"Bearer {access_token}"}
     try:
-        response = requests.get(transcript_download_url, headers=headers)
+        # requests drops the Authorization header on a cross-host redirect, so the
+        # Zoom bearer token does not follow the download URL off zoom.us
+        response = requests.get(
+            transcript_download_url, headers=headers, timeout=ZoomClient.HTTP_TIMEOUT
+        )
         response.raise_for_status()
         return response.text
     except requests.RequestException as e:

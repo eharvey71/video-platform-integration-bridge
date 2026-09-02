@@ -1,6 +1,6 @@
 from flask import render_template, redirect, url_for, send_from_directory, request, flash
 from flask_login import login_required, current_user
-import config, logging
+import config, logging, os
 from src.models import User, UICustomizations, VendorProxies
 from config import login_manager
 from src.oauth2_config import init_oauth, github_token_info, okta_token_info, oauth2_scope_validate
@@ -22,15 +22,13 @@ def app_globals():
     if app_title:
         title = app_title.integrator_title
     else:
-        title = 'Integration Manager'  
-    if proxies:
-        kaltura_proxy_enabled = proxies.kaltura_proxy_enabled
-        canvas_proxy_enabled = proxies.canvas_proxy_enabled
-        zoom_proxy_enabled = proxies.zoom_proxy_enabled
+        title = 'Integration Manager'
+    # With no VendorProxies row these names used to go unbound and every render
+    # raised UnboundLocalError. Absent configuration means nothing is enabled.
     return dict(custom_title=title,
-                kaltura_enabled=kaltura_proxy_enabled,
-                canvas_enabled=canvas_proxy_enabled,
-                zoom_enabled=zoom_proxy_enabled)
+                kaltura_enabled=bool(proxies and proxies.kaltura_proxy_enabled),
+                canvas_enabled=bool(proxies and proxies.canvas_proxy_enabled),
+                zoom_enabled=bool(proxies and proxies.zoom_proxy_enabled))
 
 app = config.connex_app
 
@@ -112,10 +110,10 @@ def send_report(path):
 def apidocs():
     api_type = request.args.get('api_type', 'kaltura')  # Default to Kaltura if not specified
     proxies = get_vendor_proxies()
-    
-    if api_type == 'kaltura' and proxies.kaltura_proxy_enabled:
+
+    if api_type == 'kaltura' and proxies and proxies.kaltura_proxy_enabled:
         api_url = "/api/ui/"
-    elif api_type == 'zoom' and proxies.zoom_proxy_enabled:
+    elif api_type == 'zoom' and proxies and proxies.zoom_proxy_enabled:
         api_url = "/zoomapi/ui/"
     else:
         # Handle the case where the requested API is not enabled
@@ -130,4 +128,6 @@ def profile():
     return render_template('profile.html', username=current_user.username, role=current_user.role)
     
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8000)
+    # Local development entry point only. Production runs under uvicorn/gunicorn
+    # (see Dockerfile).
+    app.run(host=os.getenv("DEV_BIND_HOST", "127.0.0.1"), port=int(os.getenv("PORT", "8000")))

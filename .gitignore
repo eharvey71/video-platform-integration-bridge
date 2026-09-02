@@ -338,3 +338,9 @@ pyrightconfig.json
 .python-version
 
 # End of https://www.toptal.com/developers/gitignore/api/python,node,visualstudiocode
+
+# Local SQLite database. Generate the sample data with `python build_test_db.py`
+# rather than committing the binary -- it carries user password hashes and the
+# Kaltura/Zoom/Canvas client secrets entered through the admin UI.
+database/*.db
+!database/.gitkeep

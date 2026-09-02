@@ -5,7 +5,7 @@ import config, time, os, src.logger as logger
 from src.models import User
 
 JWT_ISSUER = "com.enwiseweb.edtechib"
-JWT_SECRET = os.getenv('JWT_SECRET', 'missing_JWT_secret - check .env' )
+JWT_SECRET = config._require_secret("JWT_SECRET")
 JWT_LIFETIME_SECONDS = 600
 JWT_ALGORITHM = "HS256"
 
@@ -22,24 +22,21 @@ def generate_token(user_id):
 
 def decode_token(token):
     try:
-        return jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        # issuer is verified so a token minted by an unrelated service that happens
+        # to share our secret cannot be replayed here
+        return jwt.decode(
+            token, JWT_SECRET, algorithms=[JWT_ALGORITHM], issuer=JWT_ISSUER
+        )
     except JWTError as e:
         raise Unauthorized from e
-
-
-def get_secret(user, token_info) -> str:
-    return """
-    You are user_id {user} and the secret is 'wbevuec'.
-    Decoded token claims: {token_info}.
-    """.format(
-        user=user, token_info=token_info
-    )
 
 def _current_timestamp() -> int:
     return int(time.time())
 
 
 def swag_auth(username, password):
+    if not username or not password:
+        return None
     with config.connex_app.app.app_context():
         user = User.query.filter_by(username=username).first()
     if not user or not check_password_hash(user.password, password):
@@ -49,14 +46,6 @@ def swag_auth(username, password):
         return {"sub": username}
     # optional: raise exception for custom error response
     return None
-
-def get_user_credentials(username):
-    with config.connex_app.app.app_context():
-        user = User.query.filter_by(username=username).first()
-    if user:
-        return user.username, user.password
-    else:
-        return None, None
 
 
 

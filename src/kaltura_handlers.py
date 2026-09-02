@@ -4,33 +4,54 @@ from pprint import pprint
 
 import hashlib
 import json, requests, src.logger as logger
+from urllib.parse import urlencode
 from src.models import AccessRestrictions, AppTokenSessionDefaults, KalturaAppToken
 
 kaltura_header = {
     "Content-Type": "application/x-www-form-urlencoded",
 }
 kaltura_service_url = 'https://www.kaltura.com/api_v3/service'
+KALTURA_HTTP_TIMEOUT = 30
+
+
+def _post(path, params):
+    """POST a form-encoded body to Kaltura.
+
+    Every value goes through urlencode. Building these bodies by string
+    concatenation let a caller smuggle "&filter[...]=..." through any parameter
+    and rewrite the query we intended to send.
+    """
+    return requests.post(
+        kaltura_service_url + path,
+        headers=kaltura_header,
+        data=urlencode(params),
+        timeout=KALTURA_HTTP_TIMEOUT,
+    )
 
 def filter_category(kaltura_tags='', freetext='', ks='', label=''):
 
     # TODO: Ensure that category restrictions are applied here?
     
     log_info = ''
-    tag_filter = ''
+    tag_filter = {}
 
     if kaltura_tags:
         log_info = f'Retrieving categories tagged with {kaltura_tags}'
-        tag_filter = '&filter[tagsMultiLikeAnd]=' + kaltura_tags 
+        tag_filter['filter[tagsMultiLikeAnd]'] = kaltura_tags
 
     if freetext:
         separator = '\n\n' if log_info else ''
         log_info += f'{separator}Retrieving categories containing text {freetext}'
-        tag_filter += '&filter[freeText]=' + freetext
+        tag_filter['filter[freeText]'] = freetext
 
     ks = resolve_session(label, ks, log_info)
-    
-    data = 'ks=' + ks + tag_filter + '&format=1&filter[objectType]=KalturaCategoryFilter'
-    response = requests.post(kaltura_service_url + '/category/action/list', headers=kaltura_header, data=data)
+
+    response = _post('/category/action/list', {
+        'ks': ks,
+        **tag_filter,
+        'format': 1,
+        'filter[objectType]': 'KalturaCategoryFilter',
+    })
     json_response = json.loads(response.text)
     logger.log("Returned category list")
     
@@ -51,8 +72,9 @@ def get_transcript(entry_id, ks='', label=''):
     log_info = 'Get caption transcript for entry id: ' + entry_id
     ks = resolve_session(label, ks, log_info)
     
-    data = 'ks=' + ks + '&format=1&captionAssetId=' + asset_id
-    response = requests.post(kaltura_service_url + '/caption_captionasset/action/serveAsJson', headers=kaltura_header, data=data)
+    response = _post('/caption_captionasset/action/serveAsJson', {
+        'ks': ks, 'format': 1, 'captionAssetId': asset_id,
+    })
     json_response = json.loads(response.text)
     logger.log('Caption transcript retrieved for entry ID: ' + str(entry_id))
     
@@ -62,8 +84,9 @@ def get_caption_list(entry_id, ks='', label=''):
     
     log_info = 'Get caption list for entry: ' + entry_id
     ks = resolve_session(label, ks, log_info)
-    data = 'ks=' +  ks + '&format=1&filter[entryIdEqual]=' + entry_id
-    response = requests.post(kaltura_service_url + '/caption_captionasset/action/list', headers=kaltura_header, data=data)
+    response = _post('/caption_captionasset/action/list', {
+        'ks': ks, 'format': 1, 'filter[entryIdEqual]': entry_id,
+    })
     json_response = json.loads(response.text)
     logger.log('Caption list retrieved for entry ID: ' + str(entry_id))
 
@@ -76,8 +99,9 @@ def get_category_info(category_id, ks='', label=''):
     if category_allowed(category_id):
         log_info = 'Getting info for a single category: ' + category_id
         ks = resolve_session(label, ks, log_info)
-        data = 'ks=' +  ks + '&format=1&id=' + category_id
-        response = requests.post(kaltura_service_url + '/category/action/get', headers=kaltura_header, data=data)
+        response = _post('/category/action/get', {
+            'ks': ks, 'format': 1, 'id': category_id,
+        })
         json_response = json.loads(response.text)
     else:
         json_response = empty_response
@@ -88,30 +112,43 @@ def get_category_info(category_id, ks='', label=''):
 def get_entries_by_category(category_id='', full_cat_id='', ks='', label=''):
 
     empty_response = {"objects": []}
-    isAllowed = category_allowed(category_id)
 
-    if isAllowed:
-        
-        if full_cat_id:
-            log_info = 'Get entries using full category id: ' + full_cat_id
-            ks = resolve_session(label, ks, log_info)
-            data = 'ks=' + ks + '&format=1&filter[objectType]=KalturaMediaEntryFilter&filter[categoriesFullNameIn]=' + full_cat_id
-            
-        elif category_id:
-            log_info = 'Get entries from category: ' + category_id
-            ks = resolve_session(label, ks, log_info)
-            data = 'ks=' + ks + '&format=1&filter[objectType]=KalturaMediaEntryFilter&filter[categoriesIdsMatchAnd]=' + category_id
-            
-        response = requests.post(
-            kaltura_service_url + '/media/action/list', headers=kaltura_header, data=data
+    if not full_cat_id and not category_id:
+        logger.log('Entry lookup attempted with neither a category ID nor a full category ID')
+        return empty_response
+
+    # full_cat_id is a category *name path*, so it cannot be checked against the
+    # numeric allowed-categories list. The old code validated category_id and then
+    # queried on full_cat_id, so supplying an allowed category_id alongside any
+    # full_cat_id read straight past the allowlist. When an allowlist is in force,
+    # full-name lookups are refused rather than waved through.
+    if full_cat_id and not _allowlist_is_open():
+        logger.log(
+            'Attempted a full category name lookup (' + str(full_cat_id) +
+            ') while an allowed-categories list is configured; refused'
         )
-        json_response = json.loads(response.text)
+        return empty_response
 
-    else:
-        json_response = empty_response
+    if not full_cat_id and not category_allowed(category_id):
         logger.log('Attempted to retrieve entries by category ID ' + str(category_id) + ' but was not administratively allowed')
+        return empty_response
 
-    return json_response
+    if full_cat_id:
+        log_info = 'Get entries using full category id: ' + full_cat_id
+        ks = resolve_session(label, ks, log_info)
+        category_filter = {'filter[categoriesFullNameIn]': full_cat_id}
+    else:
+        log_info = 'Get entries from category: ' + category_id
+        ks = resolve_session(label, ks, log_info)
+        category_filter = {'filter[categoriesIdsMatchAnd]': category_id}
+
+    response = _post('/media/action/list', {
+        'ks': ks,
+        'format': 1,
+        'filter[objectType]': 'KalturaMediaEntryFilter',
+        **category_filter,
+    })
+    return json.loads(response.text)
 
 def start_ksession(payload):
     
@@ -216,20 +253,38 @@ def check_token(token_id):
     
     return good_token
 
-def category_allowed(category_id):
-    isAllowed = False
-    
-    # Check against allowed categories list in database
+def _allowlist_is_open():
+    """True when no allowed-categories restriction is configured."""
     access_restrictions = AccessRestrictions.query.get(1)
-    allowed_categories = access_restrictions.allowed_categories
-    
-    if allowed_categories == '':
-        isAllowed = True
-    else:
-        allowed_categories_list = [int(x) for x in allowed_categories.split(',')]
+    if not access_restrictions:
+        return True
+    allowed = access_restrictions.allowed_categories
+    return not allowed or not allowed.strip()
 
-        for category in allowed_categories_list:
-            if category == int(category_id):
-                isAllowed = True
-    
-    return isAllowed
+
+def category_allowed(category_id):
+    # Check against allowed categories list in database
+    if _allowlist_is_open():
+        return True
+
+    access_restrictions = AccessRestrictions.query.get(1)
+    allowed_categories_list = [
+        x.strip() for x in access_restrictions.allowed_categories.split(',') if x.strip()
+    ]
+
+    # A non-numeric or empty category_id used to raise ValueError out of the
+    # handler; an unparseable id is simply not on the list.
+    try:
+        requested = int(category_id)
+    except (TypeError, ValueError):
+        logger.log('Rejected non-numeric category ID: ' + str(category_id))
+        return False
+
+    for category in allowed_categories_list:
+        try:
+            if int(category) == requested:
+                return True
+        except ValueError:
+            continue
+
+    return False
