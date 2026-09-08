@@ -1,65 +1,53 @@
-import unittest
-from unittest.mock import patch, MagicMock
-from zoom_handlers import ZoomClient, ZoomOAuth, get_meeting_recordings, get_meeting_transcript, extract_canvas_course_id
-from models import ZoomClientConfig
+import pytest
 
-class TestZoomHandlers(unittest.TestCase):
+from src.zoom_handlers import validate_zoom_url, validate_access_key
+from src.models import ZoomClientConfig, db
 
-    def setUp(self):
-        self.mock_config = ZoomClientConfig(
-            zoom_client_id="mock_client_id",
-            zoom_client_secret="mock_client_secret",
-            zoom_account_id="mock_account_id"
-        )
 
-    @patch('zoom_handlers.ZoomOAuth.get_config')
-    @patch('requests.post')
-    def test_zoom_oauth_get_access_token(self, mock_post, mock_get_config):
-        mock_get_config.return_value = self.mock_config
-        mock_post.return_value.json.return_value = {
-            "access_token": "mock_access_token",
-            "expires_in": 3600
-        }
+@pytest.mark.parametrize("url", [
+    "https://zoom.us/rec/download/abc",
+    "https://us02web.zoom.us/rec/download/abc",
+    "https://company.us02web.zoom.us/rec/download/abc",
+])
+def test_validate_zoom_url_accepts_zoom_hosts(url):
+    assert validate_zoom_url(url) is True
 
-        oauth = ZoomOAuth()
-        token = oauth.get_access_token()
 
-        self.assertEqual(token, "mock_access_token")
-        mock_post.assert_called_once()
+@pytest.mark.parametrize("url", [
+    # The old regex left the dot in "zoom.us" unescaped, so this host was accepted
+    # and get_recording_transcript_by_url would send a Zoom bearer token to it.
+    "https://zoomxus/rec/download/abc",
+    "https://zoom.us.evil.com/rec/download/abc",
+    "https://evil.com/https://zoom.us/rec",
+    "https://notzoom.us.attacker.net/",
+    "http://zoom.us/rec/download/abc",
+    "ftp://zoom.us/rec",
+    "",
+    "not a url",
+])
+def test_validate_zoom_url_rejects_non_zoom_hosts(url):
+    assert validate_zoom_url(url) is False
 
-    @patch('zoom_handlers.ZoomClient._make_request')
-    def test_get_meeting_recordings(self, mock_make_request):
-        mock_make_request.return_value = {"recording_files": [{"id": "123", "file_type": "TRANSCRIPT"}]}
-        
-        client = ZoomClient()
-        result = get_meeting_recordings(client, "mock_meeting_id")
 
-        self.assertEqual(result["recording_files"][0]["id"], "123")
-        mock_make_request.assert_called_once_with("GET", "meetings/mock_meeting_id/recordings")
+def test_access_key_not_required_when_toggle_is_off(app_ctx):
+    db.session.add(ZoomClientConfig(
+        id=1, zoom_client_id="i", zoom_client_secret="s", zoom_account_id="a",
+        access_key="correct-key", require_access_key=False,
+    ))
+    db.session.commit()
+    assert validate_access_key("correct-key") is None
 
-    def test_extract_canvas_course_id(self):
-        meeting_details = {
-            "topic": "Meeting for Canvas Course ID: 12345",
-            "agenda": "Discuss project for Canvas Course",
-            "settings": {
-                "custom_keys": [
-                    {"key": "canvas_course_id", "value": "67890"}
-                ]
-            }
-        }
 
-        course_id = extract_canvas_course_id(meeting_details)
-        self.assertEqual(course_id, "12345")
+def test_access_key_accepts_only_the_configured_key(app_ctx):
+    db.session.add(ZoomClientConfig(
+        id=1, zoom_client_id="i", zoom_client_secret="s", zoom_account_id="a",
+        access_key="correct-key", require_access_key=True,
+    ))
+    db.session.commit()
 
-        # Test with course ID in custom attributes
-        meeting_details["topic"] = "Regular meeting"
-        course_id = extract_canvas_course_id(meeting_details)
-        self.assertEqual(course_id, "67890")
-
-        # Test with no course ID
-        meeting_details["settings"]["custom_keys"] = []
-        course_id = extract_canvas_course_id(meeting_details)
-        self.assertIsNone(course_id)
-
-if __name__ == '__main__':
-    unittest.main()
+    assert validate_access_key("correct-key") == {"sub": "zoom_api_user"}
+    assert validate_access_key("wrong-key") is None
+    assert validate_access_key("") is None
+    assert validate_access_key(None) is None
+    # a prefix must not pass -- compare_digest is length-aware
+    assert validate_access_key("correct") is None

@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" href="/favicon.ico" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <title>Integration Bridge</title>
+    <script>
+      // Applied before first paint so a dark-set OS does not flash a dark frame
+      // before React mounts. Light is the default; "system" is opt-in.
+      (function () {
+        var theme = 'light'
+        try {
+          var stored = localStorage.getItem('vpib-theme')
+          if (stored === 'dark' || stored === 'light' || stored === 'system') theme = stored
+        } catch (e) {
+          /* storage blocked; fall back to the light default */
+        }
+        var root = document.documentElement
+        if (theme === 'system') {
+          root.style.colorScheme = 'light dark'
+        } else {
+          root.setAttribute('data-theme', theme)
+          root.style.colorScheme = theme
+        }
+      })()
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

@@ -18,6 +18,7 @@ The integration bridge currently performs the following
 * Labels (tied to app tokens) can be created. Vendors use the labels for creating Kaltura sessions, preventing direct access to the Kaltura APIs.
 * Leverages a swagger UI for rapid endpoint development and testing on the fly.
 * Easy Deployment. Open Source. Host anywhere.
+* Administration is a React + TypeScript single-page app, served by the same Flask process.
 
 Purpose
 -------
@@ -28,6 +29,22 @@ Purpose
   * Multiple app tokens need to be created and tracked in order to provide the security and restrictions that university admins desire (read-only access to specific categories).
   * Setting entitlements on specific categories manually in KMC isn’t scalable and may not provide the granularity necessary when a third party is using APIs.
   * Setting Privacy Contexts in the KMC would provide access to specific categories that could then be applied to a single app token… but it breaks in production: “Cannot set multiple privacy contexts when Disable Category Limit feature is turned on”.
+
+Getting started
+---------------
+
+.. code-block::
+
+    cp .env.example .env      # then set FLASK_SECRET_KEY and JWT_SECRET
+    pip install -r requirements.txt
+    python build_test_db.py   # creates database/epib.db with sample data
+
+    cd frontend && npm install && npm run build && cd ..
+    uvicorn app:app --port 8000
+
+The app will not start without ``FLASK_SECRET_KEY`` and ``JWT_SECRET`` -- see
+``.env.example``. The sample database is generated rather than committed, so a
+fresh clone never carries credentials.
 
 Future development
 ------------------

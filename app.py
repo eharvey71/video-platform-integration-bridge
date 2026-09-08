@@ -1,41 +1,28 @@
-from flask import render_template, redirect, url_for, send_from_directory, request, flash
-from flask_login import login_required, current_user
-import config, logging
-from src.models import User, UICustomizations, VendorProxies
+from flask import send_from_directory, jsonify, request
+from flask_login import login_required
+import config, os
+from src.models import User
 from config import login_manager
-from src.oauth2_config import init_oauth, github_token_info, okta_token_info, oauth2_scope_validate
+from src.oauth2_config import init_oauth
 
 # Import Blueprints
 from auth.routes import auth_bp
-from kaltura.routes import kaltura_bp
-from settings.routes import settings_bp
 from canvas.routes import canvas_bp
-from zoom.routes import zoom_bp
-
-def get_vendor_proxies():
-    return VendorProxies.query.get(1)
-
-@config.connex_app.app.context_processor
-def app_globals():
-    app_title = UICustomizations.query.get(1)
-    proxies = get_vendor_proxies()
-    if app_title:
-        title = app_title.integrator_title
-    else:
-        title = 'Integration Manager'  
-    if proxies:
-        kaltura_proxy_enabled = proxies.kaltura_proxy_enabled
-        canvas_proxy_enabled = proxies.canvas_proxy_enabled
-        zoom_proxy_enabled = proxies.zoom_proxy_enabled
-    return dict(custom_title=title,
-                kaltura_enabled=kaltura_proxy_enabled,
-                canvas_enabled=canvas_proxy_enabled,
-                zoom_enabled=zoom_proxy_enabled)
+from adminapi.routes import adminapi_bp
+from src.models import VendorProxies
 
 app = config.connex_app
 
 # Initialize OAuth
 init_oauth(app.app)
+
+# The built single-page admin UI. `npm run build` in frontend/ writes here.
+SPA_DIST = config.basedir / "frontend" / "dist"
+
+
+def get_vendor_proxies():
+    return VendorProxies.query.get(1)
+
 
 # Add API based on proxies
 with app.app.app_context():
@@ -73,61 +60,74 @@ with app.app.app_context():
 
 # Register Blueprints
 app.app.register_blueprint(auth_bp, url_prefix='/auth')
-app.app.register_blueprint(kaltura_bp, url_prefix='/kaltura')
-app.app.register_blueprint(settings_bp, url_prefix='/settings')
 app.app.register_blueprint(canvas_bp, url_prefix='/canvas')
-app.app.register_blueprint(zoom_bp, url_prefix='/zoom')
+app.app.register_blueprint(adminapi_bp, url_prefix='/adminapi')
+
 
 @login_manager.user_loader
 def user_loader(user_id):
-    """Given *user_id*, return the associated User object.
-    :param unicode user_id: user_id (email) user to retrieve
-    """
+    """Given *user_id*, return the associated User object."""
     return User.query.get(user_id)
 
-@app.route('/')
-def home():
-    if current_user.is_authenticated:
-        return redirect(url_for('logpage'))
-    else:
-        return redirect(url_for('auth.login'))
 
-@app.route('/log')
-@login_required
-def logpage():
-    #b_lines = [row for row in reversed(list(open("logs/log", "r")))]
-    
-    logger = logging.getLogger("RotatingLog")
-    b_lines = [row for row in reversed(list(open(logger.handlers[0].baseFilename, "r")))]
+# Paths that serve data rather than the app shell. An unauthenticated request
+# to one of these has to fail, not be answered with a page.
+DATA_PATH_PREFIXES = ('/adminapi/', '/logs/', '/canvas/')
 
-    return render_template('log.html', b_lines=b_lines)
+
+@login_manager.unauthorized_handler
+def unauthorized():
+    """The admin UI talks JSON, so an expired session must not redirect it to an
+    HTML login page -- the SPA reads the 401 and shows its own.
+
+    Returning the shell for a data path was worse than a redirect: /logs/log
+    answered an unauthenticated download with 200 and a page of HTML.
+    """
+    if request.path.startswith(DATA_PATH_PREFIXES):
+        return jsonify({"error": "Authentication required"}), 401
+    # A browser navigating to a client-side route gets the shell; the SPA sees
+    # it is signed out and renders its own login screen.
+    return send_spa()
+
 
 @app.route('/logs/<path:path>')
 @login_required
 def send_report(path):
     return send_from_directory('logs', path)
 
-@app.route('/apidocs')
-@login_required
-def apidocs():
-    api_type = request.args.get('api_type', 'kaltura')  # Default to Kaltura if not specified
-    proxies = get_vendor_proxies()
-    
-    if api_type == 'kaltura' and proxies.kaltura_proxy_enabled:
-        api_url = "/api/ui/"
-    elif api_type == 'zoom' and proxies.zoom_proxy_enabled:
-        api_url = "/zoomapi/ui/"
-    else:
-        # Handle the case where the requested API is not enabled
-        flash('The requested API documentation is not available.', 'warning')
-        return redirect(url_for('home'))
 
-    return render_template('apidocs.html', api_url=api_url)
+@app.route('/assets/<path:path>')
+def spa_assets(path):
+    """Hashed JS/CSS bundles emitted by Vite."""
+    return send_from_directory(SPA_DIST / 'assets', path)
 
-@app.route('/profile')
-@login_required
-def profile():
-    return render_template('profile.html', username=current_user.username, role=current_user.role)
-    
+
+@app.route('/favicon.ico')
+def favicon():
+    return send_from_directory(config.basedir / 'static', 'favicon.ico')
+
+
+@app.route('/', defaults={'path': ''})
+@app.route('/<path:path>')
+def send_spa(path=''):
+    """Serve the SPA shell for any route the server does not own.
+
+    Client-side routing means /kaltura/tokens et al. must return index.html on a
+    hard refresh. Registered last so the API blueprints and the Connexion-mounted
+    vendor specs keep their paths.
+    """
+    index = SPA_DIST / 'index.html'
+    if not index.exists():
+        return (
+            "<h1>Admin UI is not built</h1>"
+            "<p>Run <code>npm install &amp;&amp; npm run build</code> in <code>frontend/</code>, "
+            "or <code>npm run dev</code> for the dev server.</p>",
+            503,
+        )
+    return send_from_directory(SPA_DIST, 'index.html')
+
+
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8000)
+    # Local development entry point only. Production runs under uvicorn/gunicorn
+    # (see Dockerfile).
+    app.run(host=os.getenv("DEV_BIND_HOST", "127.0.0.1"), port=int(os.getenv("PORT", "8000")))

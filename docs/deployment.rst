@@ -24,7 +24,7 @@ Development Server
     :caption: **Dockerfile**
 
     # Use an official Python runtime as a parent image
-    FROM python:3.8-slim
+    FROM python:3.12-slim
 
     # Set the working directory in the container
     WORKDIR /usr/src/app
@@ -35,32 +35,54 @@ Development Server
     # Install any needed packages specified in requirements.txt
     RUN pip install --no-cache-dir -r requirements.txt
 
-    # Generate a random secret key and store it in an environment variable
-    RUN echo "FLASK_SECRET_KEY=$(openssl rand -base64 32)" > .env
-
-    # Generate a random key for JWT Auth
-    RUN echo "JWT_SECRET=$(openssl rand -base64 32)" >> .env
+    # Secrets are generated per container at start-up by entrypoint.sh, not baked
+    # into an image layer at build time.
+    COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+    RUN chmod +x /usr/local/bin/entrypoint.sh
 
     # Flask Debug off
-    RUN echo "DEBUG=False" >> .env
-
-    # Build the starter sample database
-    RUN python build_database.py
+    ENV DEBUG=False
 
     # Make port 80 available to the world outside this container
     EXPOSE 80
 
+    ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+
     # Use Uvicorn to run the application, replace `app:app` with your application and variable
     CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "80"]
 
-3. From the root directory of the repo, build the image and launch a container (or use Docker desktop to perfom the run action)
+.. important::
+    The application refuses to start unless ``FLASK_SECRET_KEY`` and ``JWT_SECRET``
+    are set (the only exception is ``DEBUG=True``, which generates throwaway values
+    for that process). Earlier versions silently fell back to a constant string
+    compiled into the source, which meant anyone who had read the repository could
+    forge a session cookie or an API token.
+
+    Do not generate these with ``RUN`` in the Dockerfile: a secret written during
+    the build is stored in an image layer and is identical in every container
+    started from that image. Pass them in as environment variables, or let
+    ``entrypoint.sh`` mint a per-container pair.
+
+3. Build the sample database. The repository no longer ships a prebuilt
+   ``database/epib.db`` -- it carried sample administrator password hashes and the
+   Kaltura, Zoom and Canvas client secrets entered through the admin UI.
+
+.. code-block::
+
+    cp .env.example .env    # then fill in FLASK_SECRET_KEY and JWT_SECRET
+    python build_test_db.py
+
+4. From the root directory of the repo, build the image and launch a container (or use Docker desktop to perfom the run action)
 
 .. code-block::
 
     docker build . -t integration-bridge-test
-    docker run -p 4000:80 integration-bridge-test
+    docker run -p 4000:80 \
+      -e FLASK_SECRET_KEY="$(openssl rand -base64 32)" \
+      -e JWT_SECRET="$(openssl rand -base64 32)" \
+      integration-bridge-test
 
-4. Connect to http://localhost:4000/
+5. Connect to http://localhost:4000/
 
 Production Server
 ^^^^^^^^^^^^^^^^^
@@ -117,6 +139,9 @@ for configuring your serverless instance and setting up your monitoring dashboar
     RUN pip install --no-cache-dir -r requirements-prod.txt
 
     # Generate a random secret key and store it in an environment variable
+    # See the note above: supply FLASK_SECRET_KEY and JWT_SECRET as deployment
+    # environment variables (Cloud Run: --set-secrets or --set-env-vars) instead
+    # of generating them into an image layer.
     RUN echo "FLASK_SECRET_KEY=$(openssl rand -base64 32)" > .env
 
     # Generate a random key for JWT Auth
@@ -162,9 +187,39 @@ Step-by-Step Full Deployment
 The integration bridge is built using the following frameworks and libaries:
 
 * Connexion 3 Python web framework (with Flask, Uvicorn, Swagger-UI extras)
-* Bootstrap 5
+* React 18 + TypeScript, built with Vite, for the admin interface
 * SQL Alchemy ORM
 * Additional Swagger-UI Bundle (when additional customization is required)
+
+Building the admin interface
+----------------------------
+
+The admin screens are a single-page app under ``frontend/`` rather than
+server-rendered templates. Flask serves the built bundle, so a deployment needs
+it built first:
+
+.. code-block::
+
+    cd frontend
+    npm install
+    npm run build
+
+That writes ``frontend/dist/``, which Flask serves for any route it does not
+own. The Dockerfile does this in a separate ``node:22-slim`` stage, so a
+container build needs no extra step -- and the runtime image carries only the
+bundle, not the Node toolchain.
+
+For development, run Vite's dev server alongside Flask:
+
+.. code-block::
+
+    uvicorn app:app --port 8000      # one terminal
+    cd frontend && npm run dev       # another; serves on :5173
+
+Vite proxies the API paths through to Flask so the browser sees a single origin
+and the session cookie works unchanged. This is why ``CORS_ALLOWED_ORIGINS``
+ships empty: the SPA is same-origin in both development and production, and
+nothing needs a cross-origin grant.
 
 More to come ...
 
