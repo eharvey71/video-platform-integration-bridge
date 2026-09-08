@@ -101,6 +101,16 @@ app.config["SESSION_COOKIE_SECURE"] = _env_flag("SESSION_COOKIE_SECURE", not DEB
 app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(
     minutes=int(os.getenv("SESSION_LIFETIME_MINUTES", "480"))
 )
+
+# "Keep me signed in" issues a separate Flask-Login cookie, whose defaults are a
+# 365-day lifetime with neither Secure nor SameSite set. Left alone it would be
+# a long-lived credential that undoes the hardening above.
+app.config["REMEMBER_COOKIE_DURATION"] = timedelta(
+    days=int(os.getenv("REMEMBER_COOKIE_DAYS", "14"))
+)
+app.config["REMEMBER_COOKIE_HTTPONLY"] = True
+app.config["REMEMBER_COOKIE_SAMESITE"] = "Lax"
+app.config["REMEMBER_COOKIE_SECURE"] = app.config["SESSION_COOKIE_SECURE"]
 # OAuth2 configurations
 app.config['GITHUB_CLIENT_ID'] = os.getenv('GITHUB_CLIENT_ID')
 app.config['GITHUB_CLIENT_SECRET'] = os.getenv('GITHUB_CLIENT_SECRET')

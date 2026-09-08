@@ -70,12 +70,23 @@ def user_loader(user_id):
     return User.query.get(user_id)
 
 
+# Paths that serve data rather than the app shell. An unauthenticated request
+# to one of these has to fail, not be answered with a page.
+DATA_PATH_PREFIXES = ('/adminapi/', '/logs/', '/canvas/')
+
+
 @login_manager.unauthorized_handler
 def unauthorized():
     """The admin UI talks JSON, so an expired session must not redirect it to an
-    HTML login page -- the SPA reads the 401 and shows its own."""
-    if request.path.startswith('/adminapi/'):
+    HTML login page -- the SPA reads the 401 and shows its own.
+
+    Returning the shell for a data path was worse than a redirect: /logs/log
+    answered an unauthenticated download with 200 and a page of HTML.
+    """
+    if request.path.startswith(DATA_PATH_PREFIXES):
         return jsonify({"error": "Authentication required"}), 401
+    # A browser navigating to a client-side route gets the shell; the SPA sees
+    # it is signed out and renders its own login screen.
     return send_spa()
 
 

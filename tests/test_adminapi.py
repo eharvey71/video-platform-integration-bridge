@@ -1,4 +1,6 @@
 """Contract tests for the admin JSON API: the auth gate, CSRF, and secret handling."""
+import time
+
 import pytest
 from werkzeug.security import generate_password_hash
 
@@ -213,3 +215,89 @@ def test_duplicate_user_is_rejected(client, admin):
                              "email": "new@example.edu", "role": "admin"},
                        headers={"X-CSRF-Token": csrf})
     assert resp.status_code == 409
+
+
+# --- Regressions from the PR #2 review -------------------------------------
+
+def test_expired_session_reports_401_not_403(client, admin):
+    """A dropped session takes its CSRF token with it. Answering 'bad CSRF'
+    left the SPA unable to tell it simply needed to sign in again."""
+    csrf = _login(client)
+    client.delete("/adminapi/session", headers={"X-CSRF-Token": csrf})
+
+    assert client.get("/adminapi/settings").status_code == 401
+    resp = client.put("/adminapi/settings/ui", json={"title": "x"},
+                      headers={"X-CSRF-Token": csrf})
+    assert resp.status_code == 401
+
+
+def test_login_still_requires_csrf_after_the_reorder(client, admin):
+    resp = client.post("/adminapi/session",
+                       json={"username": "admin", "password": PASSWORD})
+    assert resp.status_code == 403
+
+
+def test_kaltura_config_accepts_the_nulls_its_own_get_returns(client, admin):
+    """The UI round-trips the whole object, and GET reports these as null when
+    no defaults row exists, so a null must not be a 400."""
+    csrf = _login(client)
+    current = client.get("/adminapi/kaltura/config").get_json()
+    assert current["partnerId"] is None
+
+    resp = client.put("/adminapi/kaltura/config",
+                      json={**current, "allowedCategories": "594123"},
+                      headers={"X-CSRF-Token": csrf})
+    assert resp.status_code == 200
+    assert resp.get_json()["allowedCategories"] == "594123"
+
+
+def test_partial_proxy_body_leaves_omitted_flags_alone(client, admin):
+    csrf = _login(client)
+    resp = client.put("/adminapi/settings/proxies", json={"canvas": True},
+                      headers={"X-CSRF-Token": csrf})
+    # kaltura and zoom were on in the fixture and were not mentioned.
+    assert resp.get_json()["features"] == {"kaltura": True, "canvas": True, "zoom": True}
+
+
+def test_legacy_canvas_expiry_reports_unknown_rather_than_expired(client, admin):
+    """Rows written before the value became an absolute timestamp hold the
+    expires_in duration; comparing 3600 to the clock called every one expired."""
+    from src.models import CanvasAuthorizedUsers
+
+    db.session.add(CanvasAuthorizedUsers(
+        primary_email="e", user_id=1, full_name="Legacy Row",
+        canvas_access_token="a", canvas_refresh_token="r",
+        canvas_token_expiry=3600,
+    ))
+    db.session.add(CanvasAuthorizedUsers(
+        primary_email="e", user_id=2, full_name="Current Row",
+        canvas_access_token="a", canvas_refresh_token="r",
+        canvas_token_expiry=int(time.time()) + 3600,
+    ))
+    db.session.commit()
+    _login(client)
+
+    users = {u["fullName"]: u["expired"] for u in
+             client.get("/adminapi/canvas/config").get_json()["authorizedUsers"]}
+    assert users["Legacy Row"] is None
+    assert users["Current Row"] is False
+
+
+def test_logs_path_refuses_unauthenticated_callers(client, admin):
+    """It used to answer with 200 and the SPA shell."""
+    resp = client.get("/logs/log")
+    assert resp.status_code == 401
+    assert resp.is_json
+
+
+def test_canvas_refresh_token_requires_csrf(client, admin):
+    _login(client)
+    assert client.post("/canvas/refreshtoken", data={"user_id": "1"}).status_code == 403
+
+
+def test_remember_cookie_is_hardened(app_ctx):
+    assert app_ctx.config["REMEMBER_COOKIE_HTTPONLY"] is True
+    assert app_ctx.config["REMEMBER_COOKIE_SAMESITE"] == "Lax"
+    assert app_ctx.config["REMEMBER_COOKIE_SECURE"] == app_ctx.config["SESSION_COOKIE_SECURE"]
+    # Flask-Login's default is 365 days.
+    assert app_ctx.config["REMEMBER_COOKIE_DURATION"].days <= 30

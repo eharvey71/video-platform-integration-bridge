@@ -177,7 +177,13 @@ export function CanvasConfig() {
                     <td>{u.fullName ?? <span className="muted">Unknown</span>}</td>
                     <td className="mono">{u.userId}</td>
                     <td>
-                      {u.expired ? <Badge kind="warn">Expired</Badge> : <Badge kind="ok">Valid</Badge>}
+                      {u.expired === null ? (
+                        <Badge>Unknown</Badge>
+                      ) : u.expired ? (
+                        <Badge kind="warn">Expired</Badge>
+                      ) : (
+                        <Badge kind="ok">Valid</Badge>
+                      )}
                     </td>
                     <td className="nowrap" style={{ textAlign: 'right' }}>
                       <button

@@ -62,7 +62,9 @@ export interface CanvasAuthorizedUser {
   userId: number
   fullName: string | null
   tokenExpiry: number | null
-  expired: boolean
+  // null when the stored value predates absolute expiry timestamps and so
+  // cannot be compared against the clock
+  expired: boolean | null
 }
 
 export interface CanvasConfig {

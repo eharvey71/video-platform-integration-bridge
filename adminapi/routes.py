@@ -48,12 +48,14 @@ PUBLIC_ENDPOINTS = {"adminapi.session_get", "adminapi.session_login"}
 
 @adminapi_bp.before_request
 def guard():
+    # Authentication is checked first so an expired session reports 401 rather
+    # than 403: a dropped session takes its CSRF token with it, and answering
+    # "bad CSRF token" would leave the SPA unable to tell it needs to sign in
+    # again. CSRF still gates login itself, which is a public endpoint.
+    if request.endpoint not in PUBLIC_ENDPOINTS and not current_user.is_authenticated:
+        return jsonify({"error": "Authentication required"}), 401
     if not csrf_is_valid():
         return jsonify({"error": "Invalid or missing CSRF token"}), 403
-    if request.endpoint in PUBLIC_ENDPOINTS:
-        return None
-    if not current_user.is_authenticated:
-        return jsonify({"error": "Authentication required"}), 401
     return None
 
 
@@ -191,9 +193,16 @@ def settings_proxies_put():
         )
         db.session.add(proxies)
 
-    proxies.kaltura_proxy_enabled = _as_bool(data.get("kaltura"))
-    proxies.canvas_proxy_enabled = _as_bool(data.get("canvas"))
-    proxies.zoom_proxy_enabled = _as_bool(data.get("zoom"))
+    # Only the flags actually sent are touched. Assigning all three from
+    # data.get() turned a partial body into "disable everything I omitted".
+    for key, column in (
+        ("kaltura", "kaltura_proxy_enabled"),
+        ("canvas", "canvas_proxy_enabled"),
+        ("zoom", "zoom_proxy_enabled"),
+    ):
+        if key in data:
+            setattr(proxies, column, _as_bool(data[key]))
+
     db.session.commit()
     logger.log("Proxy configurations updated")
     return jsonify({"features": _feature_flags()})
@@ -298,11 +307,15 @@ def kaltura_config_put():
         defaults = AppTokenSessionDefaults(id=1, partner_id=0, use_local_storage=False)
         db.session.add(defaults)
 
+    # GET reports these as null when no defaults row exists, and the UI round
+    # trips the whole object, so null has to mean "not set" rather than 400.
+    # partner_id is NOT NULL in the model, so a null there leaves it alone.
     try:
-        if "partnerId" in data:
+        if data.get("partnerId") is not None:
             defaults.partner_id = _as_int(data.get("partnerId"), "partnerId")
         if "sessionExpiry" in data:
-            defaults.session_expiry = _as_int(data.get("sessionExpiry"), "sessionExpiry")
+            expiry = data.get("sessionExpiry")
+            defaults.session_expiry = None if expiry is None else _as_int(expiry, "sessionExpiry")
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
 
@@ -470,6 +483,20 @@ def zoom_access_key_post():
 # Canvas
 # --------------------------------------------------------------------------
 
+# Rows written before canvas_token_expiry became an absolute timestamp hold the
+# expires_in duration instead (Canvas returns 3600). Anything below this cutoff
+# cannot be a real expiry date, so it is reported as unknown rather than being
+# compared against the clock and shown as expired.
+EPOCH_SANITY_CUTOFF = 1_000_000_000  # 2001-09-09
+
+
+def _token_expired(expiry):
+    """True/False when the stored value is an epoch, None when it is not."""
+    if not expiry or expiry < EPOCH_SANITY_CUTOFF:
+        return None
+    return expiry < int(time.time())
+
+
 @adminapi_bp.route("/canvas/config", methods=["GET"])
 def canvas_config_get():
     config = CanvasOauthConfig.query.get(1)
@@ -479,7 +506,7 @@ def canvas_config_get():
             "userId": u.user_id,
             "fullName": u.full_name,
             "tokenExpiry": u.canvas_token_expiry,
-            "expired": bool(u.canvas_token_expiry and u.canvas_token_expiry < int(time.time())),
+            "expired": _token_expired(u.canvas_token_expiry),
         }
         for u in CanvasAuthorizedUsers.query.all()
     ]

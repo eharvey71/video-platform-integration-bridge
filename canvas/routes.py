@@ -2,9 +2,19 @@ from flask import Blueprint, request, redirect, session, jsonify, abort
 from flask_login import login_required
 from src.models import CanvasOauthConfig, CanvasAuthorizedUsers, db
 import src.logger as logger
+from src.csrf import csrf_is_valid
 import requests, secrets, time
 
 canvas_bp = Blueprint('canvas', __name__, template_folder='templates')
+
+
+@canvas_bp.before_request
+def require_csrf():
+    """The OAuth callback is a GET and exempt, but /refreshtoken changes stored
+    state, so it needs the same double-submit check the admin API applies."""
+    if not csrf_is_valid():
+        return jsonify({"error": "Invalid or missing CSRF token"}), 403
+    return None
 
 # Canvas is the only party that should ever see the client secret, so every call
 # out to it is server-side and nothing from those responses is echoed back to the
